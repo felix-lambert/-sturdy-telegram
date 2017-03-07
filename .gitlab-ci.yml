@@ -1,0 +1,56 @@
+image: docker:latest
+
+variables:
+  REGISTRY: registry.gitlab.com/citytaps/ct-cloud-api
+  APP_NAME: ct-api
+  AWS_CLUSTER: ct-ecs-cluster
+  AWS_TASK_FAMILY: ct-api
+  AWS_SERVICE: ct-api
+  AWS_TASK_ROLE_ARN: arn:aws:iam::363348021638:role/ecs_access_s3_ct.secrets
+
+stages:
+  - test
+  - deploy
+
+before_script:
+  - docker info
+  - apk add --no-cache nodejs openssh git && rm -rf /var/cache/apk/*
+  - mkdir -p ~/.ssh
+  - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
+  - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+  - eval $(ssh-agent -s) && ssh-add
+  - apk add --no-cache python make g++ && rm -rf /var/cache/apk/*
+
+run_npm_test:
+  stage: test
+  services:
+  - docker:dind
+  script:
+  - npm install
+  - npm test
+
+build:
+  stage: deploy
+  services:
+  - docker:dind
+  script:
+  - npm install
+  - docker build -t $REGISTRY:test .
+  - docker run $REGISTRY:test npm test
+
+  - IMAGE_TAG=${CI_BUILD_TAG#"v"}
+  - rm -rf node_modules/
+  - npm install --production
+  - docker build -t $REGISTRY:$IMAGE_TAG .
+  - docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN $REGISTRY
+  - docker push $REGISTRY:$IMAGE_TAG
+
+  - apk add --no-cache python py-pip jq
+  - pip install awscli
+  - TASK_DEF=[\{\"name\":\"ct-web-api-container\",\"image\":\"$REGISTRY:$IMAGE_TAG\",\"cpu\":0,\"memory\":128,\"essential\":true,\"portMappings\":[\{\"hostPort\":0,\"containerPort\":8080,\"protocol\":\"tcp\"\}],\"logConfiguration\":\{\"logDriver\":\"awslogs\",\"options\":\{\"awslogs-group\":\"ECS\",\"awslogs-region\":\"eu-central-1\",\"awslogs-stream-prefix\":\"$APP_NAME\"\}\}\}]
+  - NEW_REVISION="$(aws ecs register-task-definition --family $AWS_TASK_FAMILY --task-role-arn $AWS_TASK_ROLE_ARN --container-definitions $TASK_DEF | jq '.taskDefinition.revision')"
+  - DESIRED_COUNT="$(aws ecs describe-services --cluster $AWS_CLUSTER --service $AWS_SERVICE | jq '.services[].desiredCount')"
+  - aws ecs update-service --cluster $AWS_CLUSTER --service $AWS_SERVICE --task-definition $AWS_TASK_FAMILY:$NEW_REVISION --desired-count $DESIRED_COUNT
+  - "curl -X POST -H 'Content-type: application/json' --data '{\"attachments\":[{\"color\":\"warning\",\"title\":\"New code is live :tada:\",\"text\":\"API version '$IMAGE_TAG' is deployed on our servers.\"}]}' https://hooks.slack.com/services/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"
+  only:
+    - tags

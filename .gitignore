@@ -1,0 +1,11 @@
+.DS_Store
+thumbs.db
+*.log
+node_modules/
+client/node_modules/
+client/bower_components/
+coverage/
+apidoc/
+config/*.json
+config/aws*
+*.sqlite3
